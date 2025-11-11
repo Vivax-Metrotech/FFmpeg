@@ -24,7 +24,8 @@ THIN=`pwd`/"output_ios"
 
 CONFIGURE_FLAGS="--enable-cross-compile \
                  --disable-everything \
-                 --enable-static \
+		 --disable-static \
+		 --enable-shared \
                  --enable-decoder=h264 \
                  --enable-decoder=aac \
                  --enable-parser=h264 \
@@ -50,10 +51,11 @@ CONFIGURE_FLAGS="--enable-cross-compile \
 # avresample
 #CONFIGURE_FLAGS="$CONFIGURE_FLAGS --enable-avresample"
 
-ARCHS="arm64 armv7 x86_64 i386"
+ARCHS="arm64"
 
 COMPILE="y"
-LIPO="y"
+#LIPO="y"
+DYLIB="y"
 
 DEPLOYMENT_TARGET="8.0"
 
@@ -180,6 +182,31 @@ then
 
 	cd $CWD
 	cp -rf $THIN/$1/ios/include $FAT
+fi
+
+if [ "$DYLIB" ]
+then
+	echo "making frameworks from dylibs"
+	cd $THIN/arm64/ios/lib
+	for LIB in *.dylib
+	do
+		otool -L $LIB | grep Users | while IFS= read -r DEP; do
+			RPATH="@rpath/`echo $DEP|sed 's/^.*\///'|sed 's/ .*$//'`"
+			ORG=`echo $DEP|sed 's/ .*$//'`
+		        install_name_tool -change $ORG $RPATH $LIB
+			#echo Org $DEP
+			#echo New $RPATH
+		done 
+                otool -L $LIB | grep Users | while IFS= read -r DEP; do
+                        RPATH="@rpath/`echo $DEP|sed 's/^.*\///'|sed 's/ .*$//'`"
+                        ORG=`echo $DEP|sed 's/ .*$//'`
+                        install_name_tool -id $RPATH $LIB
+                        #echo Org $DEP
+                        #echo New $RPATH
+                done
+
+
+	done
 fi
 
 echo Done
