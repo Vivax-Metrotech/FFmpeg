@@ -25,17 +25,20 @@ THIN=`pwd`/"output_ios"
 CONFIGURE_FLAGS="--enable-cross-compile \
                  --disable-everything \
 		 --disable-static \
+		 --disable-stripping \
 		 --enable-shared \
-                 --enable-decoder=h264 \
-                 --enable-decoder=aac \
+                 --enable-decoder=h264,aac \
                  --enable-parser=h264 \
                  --enable-parser=aac \
                  --enable-swscale \
                  --enable-demuxer=rtp \
                  --enable-demuxer=rtsp \
-                 --enable-encoder=aac \
+                 --enable-encoder=h264,aac \
                  --enable-muxer=adts \
+		 --enable-muxer=mp4 \
+		 --enable-protocol=file
                  --enable-protocol=tcp \
+		 --enable-rpath \
                  --disable-ffplay" 
 
 # if [ "$X264" ]
@@ -188,6 +191,14 @@ if [ "$DYLIB" ]
 then
 	echo "making frameworks from dylibs"
 	cd $THIN/arm64/ios/lib
+	for FIL in `find . -type l`
+	do 
+		TARGET=`readlink $FIL`
+		cp $TARGET tmp.dylib 
+		rm $FIL
+		cp tmp.dylib $FIL
+	done
+
 	for LIB in *.dylib
 	do
 		otool -L $LIB | grep Users | while IFS= read -r DEP; do
@@ -204,7 +215,6 @@ then
                         #echo Org $DEP
                         #echo New $RPATH
                 done
-
 
 	done
 fi
