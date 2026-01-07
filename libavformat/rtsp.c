@@ -101,6 +101,10 @@ const AVOption ff_rtsp_options[] = {
 #else
     { "timeout", "set timeout (in microseconds) of socket TCP I/O operations", OFFSET(stimeout), AV_OPT_TYPE_INT, {.i64 = 0}, INT_MIN, INT_MAX, DEC },
 #endif
+    { "tcp_localaddr", "set local address for RTSP TCP connection", OFFSET(tcp_localaddr), AV_OPT_TYPE_STRING, {.str = NULL}, 0, 0, DEC },
+    { "tcp_localif",   "set local interface for RTSP TCP connection", OFFSET(tcp_localif), AV_OPT_TYPE_STRING, {.str = NULL}, 0, 0, DEC },
+    { "udp_localif",   "set local interface for RTP/UDP sockets", OFFSET(udp_localif), AV_OPT_TYPE_STRING, {.str = NULL}, 0, 0, DEC },
+    { "udp_destination", "set destination address for RTP/UDP sockets", OFFSET(udp_destination), AV_OPT_TYPE_STRING, {.str = NULL}, 0, 0, DEC },
     COMMON_OPTS(),
     { "user_agent", "override User-Agent header", OFFSET(user_agent), AV_OPT_TYPE_STRING, {.str = LIBAVFORMAT_IDENT}, 0, 0, DEC },
 #if FF_API_OLD_RTSP_OPTIONS
@@ -800,6 +804,10 @@ void ff_rtsp_close_streams(AVFormatContext *s)
         avpriv_mpegts_parse_close(rt->ts);
     av_freep(&rt->p);
     av_freep(&rt->recvbuf);
+    av_freep(&rt->tcp_localaddr);
+    av_freep(&rt->tcp_localif);
+    av_freep(&rt->udp_localif);
+    av_freep(&rt->udp_destination);
 }
 
 int ff_rtsp_open_transport_ctx(AVFormatContext *s, RTSPStream *rtsp_st)
@@ -1479,8 +1487,13 @@ int ff_rtsp_make_setup_request(AVFormatContext *s, const char *host, int port,
             while (j <= rt->rtp_port_max) {
                 AVDictionary *opts = map_to_opts(rt);
 
-                ff_url_join(buf, sizeof(buf), "rtp", NULL, host, -1,
-                            "?localport=%d", j);
+                if (rt->udp_localif && rt->udp_localif[0]) {
+                    ff_url_join(buf, sizeof(buf), "rtp", NULL, host, -1,
+                                "?localport=%d&localif=%s", j, rt->udp_localif);
+                } else {
+                    ff_url_join(buf, sizeof(buf), "rtp", NULL, host, -1,
+                                "?localport=%d", j);
+                }
                 /* we will use two ports per rtp stream (rtp and rtcp) */
                 j += 2;
                 err = ffurl_open_whitelist(&rtsp_st->rtp_handle, buf, AVIO_FLAG_READ_WRITE,
@@ -1507,6 +1520,8 @@ int ff_rtsp_make_setup_request(AVFormatContext *s, const char *host, int port,
             if (rt->transport == RTSP_TRANSPORT_RTP &&
                 !(rt->server_type == RTSP_SERVER_WMS && i > 0))
                 av_strlcatf(transport, sizeof(transport), "-%d", port + 1);
+            if (rt->udp_destination && rt->udp_destination[0])
+                av_strlcatf(transport, sizeof(transport), ";destination=%s", rt->udp_destination);
         }
 
         /* RTP/TCP */
@@ -1831,9 +1846,19 @@ redirect:
     } else {
         int ret;
         /* open the tcp connection */
-        ff_url_join(tcpname, sizeof(tcpname), lower_rtsp_proto, NULL,
-                    host, port,
-                    "?timeout=%d", rt->stimeout);
+        if (rt->tcp_localaddr && rt->tcp_localaddr[0]) {
+            ff_url_join(tcpname, sizeof(tcpname), lower_rtsp_proto, NULL,
+                        host, port,
+                        "?timeout=%d&localaddr=%s", rt->stimeout, rt->tcp_localaddr);
+        } else if (rt->tcp_localif && rt->tcp_localif[0]) {
+            ff_url_join(tcpname, sizeof(tcpname), lower_rtsp_proto, NULL,
+                        host, port,
+                        "?timeout=%d&localif=%s", rt->stimeout, rt->tcp_localif);
+        } else {
+            ff_url_join(tcpname, sizeof(tcpname), lower_rtsp_proto, NULL,
+                        host, port,
+                        "?timeout=%d", rt->stimeout);
+        }
         if ((ret = ffurl_open_whitelist(&rt->rtsp_hd, tcpname, AVIO_FLAG_READ_WRITE,
                        &s->interrupt_callback, NULL, s->protocol_whitelist, s->protocol_blacklist, NULL)) < 0) {
             err = ret;

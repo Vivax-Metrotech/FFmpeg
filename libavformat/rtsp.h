@@ -399,6 +399,14 @@ typedef struct RTSPState {
     int stimeout;
 
     /**
+     * Local address for RTSP TCP connection.
+     */
+    char *tcp_localaddr;
+    char *tcp_localif;
+    char *udp_localif;
+    char *udp_destination;
+
+    /**
      * Size of RTP packet reordering queue.
      */
     int reordering_queue_size;

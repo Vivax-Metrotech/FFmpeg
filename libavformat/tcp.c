@@ -20,6 +20,7 @@
  */
 #include "avformat.h"
 #include "libavutil/avassert.h"
+#include "libavutil/avstring.h"
 #include "libavutil/parseutils.h"
 #include "libavutil/opt.h"
 #include "libavutil/time.h"
@@ -31,6 +32,8 @@
 #if HAVE_POLL_H
 #include <poll.h>
 #endif
+#include <arpa/inet.h>
+#include <net/if.h>
 
 typedef struct TCPContext {
     const AVClass *class;
@@ -42,6 +45,13 @@ typedef struct TCPContext {
     int recv_buffer_size;
     int send_buffer_size;
     int tcp_nodelay;
+    char *localaddr;
+    char *localif;
+    unsigned int local_ifindex;
+    int has_local_if;
+    struct sockaddr_storage local_addr;
+    socklen_t local_addr_len;
+    int has_local_addr;
 #if !HAVE_WINSOCK2_H
     int tcp_mss;
 #endif /* !HAVE_WINSOCK2_H */
@@ -57,6 +67,8 @@ static const AVOption options[] = {
     { "send_buffer_size", "Socket send buffer size (in bytes)",                OFFSET(send_buffer_size), AV_OPT_TYPE_INT, { .i64 = -1 },         -1, INT_MAX, .flags = D|E },
     { "recv_buffer_size", "Socket receive buffer size (in bytes)",             OFFSET(recv_buffer_size), AV_OPT_TYPE_INT, { .i64 = -1 },         -1, INT_MAX, .flags = D|E },
     { "tcp_nodelay", "Use TCP_NODELAY to disable nagle's algorithm",           OFFSET(tcp_nodelay), AV_OPT_TYPE_BOOL, { .i64 = 0 },             0, 1, .flags = D|E },
+    { "localaddr",   "Local address",                                           OFFSET(localaddr),      AV_OPT_TYPE_STRING, { .str = NULL },       .flags = D|E },
+    { "localif",     "Local interface name",                                    OFFSET(localif),        AV_OPT_TYPE_STRING, { .str = NULL },       .flags = D|E },
 #if !HAVE_WINSOCK2_H
     { "tcp_mss",     "Maximum segment size for outgoing TCP packets",          OFFSET(tcp_mss),     AV_OPT_TYPE_INT, { .i64 = -1 },         -1, INT_MAX, .flags = D|E },
 #endif /* !HAVE_WINSOCK2_H */
@@ -73,6 +85,25 @@ static const AVClass tcp_class = {
 static void customize_fd(void *ctx, int fd)
 {
     TCPContext *s = ctx;
+    if (s->has_local_if) {
+#ifdef IP_BOUND_IF
+        if (setsockopt(fd, IPPROTO_IP, IP_BOUND_IF, &s->local_ifindex, sizeof(s->local_ifindex)) < 0) {
+            ff_log_net_error(ctx, AV_LOG_WARNING, "setsockopt(IP_BOUND_IF)");
+        }
+#endif
+#ifdef IPV6_BOUND_IF
+        if (setsockopt(fd, IPPROTO_IPV6, IPV6_BOUND_IF, &s->local_ifindex, sizeof(s->local_ifindex)) < 0) {
+            ff_log_net_error(ctx, AV_LOG_WARNING, "setsockopt(IPV6_BOUND_IF)");
+        }
+#endif
+    }
+    if (!s->listen && s->has_local_addr) {
+        if (bind(fd, (struct sockaddr *)&s->local_addr, s->local_addr_len) < 0) {
+            ff_log_net_error(ctx, AV_LOG_ERROR, "bind(localaddr)");
+            closesocket(fd);
+            return;
+        }
+    }
     /* Set the socket's send or receive buffer sizes, if specified.
        If unspecified or setting fails, system default is used. */
     if (s->recv_buffer_size > 0) {
@@ -111,6 +142,9 @@ static int tcp_open(URLContext *h, const char *uri, int flags)
     char hostname[1024],proto[1024],path[1024];
     char portstr[10];
     s->open_timeout = 5000000;
+    s->has_local_addr = 0;
+    s->local_addr_len = 0;
+    s->has_local_if = 0;
 
     av_url_split(proto, sizeof(proto), NULL, 0, hostname, sizeof(hostname),
         &port, path, sizeof(path), uri);
@@ -135,6 +169,26 @@ static int tcp_open(URLContext *h, const char *uri, int flags)
         if (av_find_info_tag(buf, sizeof(buf), "listen_timeout", p)) {
             s->listen_timeout = strtol(buf, NULL, 10);
         }
+        if (av_find_info_tag(buf, sizeof(buf), "localaddr", p)) {
+            av_freep(&s->localaddr);
+            s->localaddr = av_strdup(buf);
+            if (!s->localaddr)
+                return AVERROR(ENOMEM);
+        }
+        if (av_find_info_tag(buf, sizeof(buf), "localif", p)) {
+            av_freep(&s->localif);
+            s->localif = av_strdup(buf);
+            if (!s->localif)
+                return AVERROR(ENOMEM);
+        }
+    }
+    if (s->localif && s->localif[0]) {
+        s->local_ifindex = if_nametoindex(s->localif);
+        if (!s->local_ifindex) {
+            av_log(h, AV_LOG_ERROR, "Unknown interface name %s\n", s->localif);
+            return AVERROR(EINVAL);
+        }
+        s->has_local_if = 1;
     }
     if (s->rw_timeout >= 0) {
         s->open_timeout =
@@ -145,6 +199,19 @@ static int tcp_open(URLContext *h, const char *uri, int flags)
     snprintf(portstr, sizeof(portstr), "%d", port);
     if (s->listen)
         hints.ai_flags |= AI_PASSIVE;
+    if (!s->listen && s->localaddr && s->localaddr[0]) {
+        struct in_addr ipv4_addr;
+#if HAVE_STRUCT_SOCKADDR_IN6
+        struct in6_addr ipv6_addr;
+#endif
+        if (inet_pton(AF_INET, s->localaddr, &ipv4_addr) == 1) {
+            hints.ai_family = AF_INET;
+#if HAVE_STRUCT_SOCKADDR_IN6
+        } else if (inet_pton(AF_INET6, s->localaddr, &ipv6_addr) == 1) {
+            hints.ai_family = AF_INET6;
+#endif
+        }
+    }
     if (hostname[0]) {
         struct in_addr ipv4_addr;
         if (inet_pton(AF_INET, hostname, &ipv4_addr) == 1) {
@@ -175,6 +242,40 @@ static int tcp_open(URLContext *h, const char *uri, int flags)
         }
     }
 #endif
+    if (!s->listen && s->localaddr && s->localaddr[0]) {
+        struct addrinfo lhints = { 0 }, *lai = NULL;
+        lhints.ai_socktype = SOCK_STREAM;
+        lhints.ai_family = hints.ai_family;
+        if (lhints.ai_family == AF_UNSPEC) {
+            struct in_addr ipv4_addr;
+#if HAVE_STRUCT_SOCKADDR_IN6
+            struct in6_addr ipv6_addr;
+#endif
+            if (inet_pton(AF_INET, s->localaddr, &ipv4_addr) == 1) {
+                lhints.ai_family = AF_INET;
+                lhints.ai_flags |= AI_NUMERICHOST;
+#if HAVE_STRUCT_SOCKADDR_IN6
+            } else if (inet_pton(AF_INET6, s->localaddr, &ipv6_addr) == 1) {
+                lhints.ai_family = AF_INET6;
+                lhints.ai_flags |= AI_NUMERICHOST;
+#endif
+            }
+        }
+        ret = getaddrinfo(s->localaddr, NULL, &lhints, &lai);
+        if (ret) {
+            av_log(h, AV_LOG_ERROR,
+                   "Failed to resolve local address %s: %s\n",
+                   s->localaddr, gai_strerror(ret));
+            ret = AVERROR(EIO);
+            goto fail1;
+        }
+        if (lai && lai->ai_addr && lai->ai_addrlen <= sizeof(s->local_addr)) {
+            memcpy(&s->local_addr, lai->ai_addr, lai->ai_addrlen);
+            s->local_addr_len = lai->ai_addrlen;
+            s->has_local_addr = 1;
+        }
+        freeaddrinfo(lai);
+    }
 
     if (s->listen > 0) {
         while (cur_ai && fd < 0) {
@@ -288,6 +389,8 @@ static int tcp_shutdown(URLContext *h, int flags)
 static int tcp_close(URLContext *h)
 {
     TCPContext *s = h->priv_data;
+    av_freep(&s->localaddr);
+    av_freep(&s->localif);
     closesocket(s->fd);
     return 0;
 }

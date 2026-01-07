@@ -46,6 +46,7 @@
 #ifdef __APPLE__
 #include "TargetConditionals.h"
 #endif
+#include <net/if.h>
 
 #if HAVE_UDPLITE_H
 #include "udplite.h"
@@ -106,6 +107,9 @@ typedef struct UDPContext {
     uint8_t tmp[UDP_MAX_PKT_SIZE+4];
     int remaining_in_dg;
     char *localaddr;
+    char *localif;
+    unsigned int local_ifindex;
+    int has_local_if;
     int timeout;
     struct sockaddr_storage local_addr_storage;
     char *sources;
@@ -123,6 +127,7 @@ static const AVOption options[] = {
     { "localport",      "Local port",                                      OFFSET(local_port),     AV_OPT_TYPE_INT,    { .i64 = -1 },    -1, INT_MAX, D|E },
     { "local_port",     "Local port",                                      OFFSET(local_port),     AV_OPT_TYPE_INT,    { .i64 = -1 },    -1, INT_MAX, .flags = D|E },
     { "localaddr",      "Local address",                                   OFFSET(localaddr),      AV_OPT_TYPE_STRING, { .str = NULL },               .flags = D|E },
+    { "localif",        "Local interface name",                            OFFSET(localif),        AV_OPT_TYPE_STRING, { .str = NULL },               .flags = D|E },
     { "udplite_coverage", "choose UDPLite head size which should be validated by checksum", OFFSET(udplite_coverage), AV_OPT_TYPE_INT, {.i64 = 0}, 0, INT_MAX, D|E },
     { "pkt_size",       "Maximum UDP packet size",                         OFFSET(pkt_size),       AV_OPT_TYPE_INT,    { .i64 = 1472 },  -1, INT_MAX, .flags = D|E },
     { "reuse",          "explicitly allow reusing UDP sockets",            OFFSET(reuse_socket),   AV_OPT_TYPE_BOOL,   { .i64 = -1 },    -1, 1,       D|E },
@@ -712,6 +717,12 @@ static int udp_open(URLContext *h, const char *uri, int flags)
         if (av_find_info_tag(buf, sizeof(buf), "localaddr", p)) {
             av_strlcpy(localaddr, buf, sizeof(localaddr));
         }
+        if (av_find_info_tag(buf, sizeof(buf), "localif", p)) {
+            av_freep(&s->localif);
+            s->localif = av_strdup(buf);
+            if (!s->localif)
+                goto fail;
+        }
         if (av_find_info_tag(buf, sizeof(buf), "sources", p)) {
             if (ff_ip_parse_sources(h, buf, &s->filters) < 0)
                 goto fail;
@@ -756,6 +767,25 @@ static int udp_open(URLContext *h, const char *uri, int flags)
         udp_fd = udp_socket_create(h, &my_addr, &len, s->localaddr);
     if (udp_fd < 0)
         goto fail;
+
+    if (s->localif && s->localif[0]) {
+        s->local_ifindex = if_nametoindex(s->localif);
+        if (!s->local_ifindex) {
+            av_log(h, AV_LOG_ERROR, "Unknown interface name %s\n", s->localif);
+            goto fail;
+        }
+        s->has_local_if = 1;
+#ifdef IP_BOUND_IF
+        if (setsockopt(udp_fd, IPPROTO_IP, IP_BOUND_IF, &s->local_ifindex, sizeof(s->local_ifindex)) < 0) {
+            ff_log_net_error(h, AV_LOG_WARNING, "setsockopt(IP_BOUND_IF)");
+        }
+#endif
+#ifdef IPV6_BOUND_IF
+        if (setsockopt(udp_fd, IPPROTO_IPV6, IPV6_BOUND_IF, &s->local_ifindex, sizeof(s->local_ifindex)) < 0) {
+            ff_log_net_error(h, AV_LOG_WARNING, "setsockopt(IPV6_BOUND_IF)");
+        }
+#endif
+    }
 
     s->local_addr_storage=my_addr; //store for future multicast join
 
@@ -1081,6 +1111,7 @@ static int udp_close(URLContext *h)
     }
 #endif
     closesocket(s->udp_fd);
+    av_freep(&s->localif);
     av_fifo_freep(&s->fifo);
     ff_ip_reset_filters(&s->filters);
     return 0;
