@@ -145,6 +145,14 @@ static int tcp_open(URLContext *h, const char *uri, int flags)
     snprintf(portstr, sizeof(portstr), "%d", port);
     if (s->listen)
         hints.ai_flags |= AI_PASSIVE;
+    if (hostname[0]) {
+        struct in_addr ipv4_addr;
+        if (inet_pton(AF_INET, hostname, &ipv4_addr) == 1) {
+            // Avoid NAT64 synthesis for numeric IPv4 addresses (e.g., 192.168.x.x).
+            hints.ai_family = AF_INET;
+            hints.ai_flags |= AI_NUMERICHOST;
+        }
+    }
     if (!hostname[0])
         ret = getaddrinfo(NULL, portstr, &hints, &ai);
     else
